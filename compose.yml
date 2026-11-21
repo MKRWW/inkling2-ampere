@@ -1,0 +1,53 @@
+# Inkling 2 Mini on a single 24 GB Ampere card.
+# MODEL_DIR: checkpoint directory (original or the all-NVFP4 copy from tools/nvfp4_convert.py).
+# Defaults: FP8 KV cache (software E4M3), 1 sequence, 128 batched tokens.
+#   original checkpoint:  INK_CTX=180224
+#   all-NVFP4 copy:       INK_CTX=262144
+services:
+  vllm:
+    image: inkling-2-mini:ampere
+    build: .
+    container_name: inkling-ampere
+    restart: unless-stopped
+    ports:
+      - "8000:8000"
+    volumes:
+      - ${MODEL_DIR:?set MODEL_DIR}:/model:ro
+      - ./humming-cache:/hcache
+    environment:
+      - PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
+      - TRITON_DISABLE_GDC=1
+      - HUMMING_CACHE_DIR=/hcache
+    ipc: host
+    shm_size: "16g"
+    command:
+      - --model
+      - /model
+      - --served-model-name
+      - inkling-2-mini
+      - --max-model-len
+      - "${INK_CTX:-180224}"
+      - --kv-cache-dtype
+      - "${INK_KV:-fp8}"
+      - --gpu-memory-utilization
+      - "0.97"
+      - --max-num-seqs
+      - "${INK_SEQS:-1}"
+      - --max-num-batched-tokens
+      - "${INK_BATCH:-128}"
+      - --limit-mm-per-prompt
+      - '{"image":2,"video":0}'
+      - --enable-prefix-caching
+      - --enable-chunked-prefill
+      - --reasoning-parser
+      - inkling
+      - --enable-auto-tool-choice
+      - --tool-call-parser
+      - inkling
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              device_ids: ["${GPU:-0}"]
+              capabilities: [gpu]
