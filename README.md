@@ -5,6 +5,7 @@ Blackwell. On an Ampere card (SM 8.x, e.g. RTX 3090) the image refuses to start.
 
 This repository holds a small patch set (13 patches, 165 lines) that runs the model on a **single 24 GB RTX 3090**.
 It also has a tool that moves the last four MXFP8 expert layers to NVFP4. With that, 256K context fits on the card.
+A second, optional patch enables speculative decoding with the bundled DSpark draft head (code roughly 1.8x faster).
 
 Tested on one RTX 3090 (power limit 250 W) with the image `vllm/vllm-openai:inkling-2-mini`, November 2026.
 
@@ -42,6 +43,40 @@ fails loudly.
 
 The MoE runs through the image's existing Humming kernels (the Hopper fallback). They unpack NVFP4/MXFP8 in
 software and compute in BF16.
+
+## Optional: speculative decoding (DSpark)
+
+The checkpoint ships a DSpark draft head (`mtp.safetensors`, 0.64 GB). vLLM uses it with
+`--speculative-config '{"method":"dspark"}'`. It always drafts 7 tokens (the checkpoint's block size minus one);
+vLLM rejects other values.
+
+On Ampere the draft path needs `patch/patch_dspark.py` (included in the `Dockerfile`, it runs after
+`patch_ampere.py`). Two parts of the draft have no SM 8.6 kernels in this image:
+
+1. `_RMSNorm` uses flashinfer norms, and the vLLM `_C` rms_norm has no SM 8.6 image either. On pre-Hopper GPUs it
+   now runs in PyTorch with fp32 math.
+2. The draft KV write uses `reshape_and_cache_flash` from vLLM `_C`. It is replaced by a small Triton scatter
+   kernel. It skips padding slots (< 0) and writes FP8 with the same software E4M3 encoding as patches 10 to 13.
+   It needs no host synchronization, so CUDA graphs still work.
+
+Measured on one RTX 3090 (250 W) with the all-NVFP4 copy, 2 sequences of 128K, 256 batched tokens, FP8 KV cache,
+700 output tokens, thinking off:
+
+| | Without DSpark | With DSpark |
+|---|---|---|
+| Code, single stream | 74 tok/s | 135 tok/s |
+| Code, 2 streams | 61 tok/s each | 100 to 114 tok/s each |
+| Prose, single stream | 74 tok/s | 72 tok/s |
+| Prose, 2 streams | 61 tok/s each | 57 to 58 tok/s each |
+| KV cache | 246,531 tokens | 163,892 tokens |
+
+About 19 % of the drafted tokens are accepted. Code and structured output gain the most, prose stays about the
+same. The draft head costs KV cache: with 2 × 128K, both sequences no longer fit at full length at the same time.
+Answers to the smoke tests (arithmetic, a fact, a tool call) are unchanged.
+
+A debugging note: on this image a missing kernel often shows up as `no kernel image is available` one launch
+later, at the next PyTorch kernel. To find the real culprit, run the operation, call `torch.cuda.synchronize()`,
+then launch any small PyTorch kernel.
 
 ## Build and run
 
@@ -97,7 +132,8 @@ Once it was left with a half-finished change (1/210).
 
 ## Limits
 
-- One sequence at a time on 24 GB. A long prefill blocks every other request for minutes.
+- With one sequence, a long prefill blocks every other request for minutes. Two sequences of 128K fit; then a
+  prefill on one slows the other one down a lot (to about 7 tok/s).
 - Only tested on RTX 3090 (SM 8.6). A100 (SM 8.0) should work but is untested.
 - Tied to the image `vllm/vllm-openai:inkling-2-mini`. A new image version may move the patched lines.
   The patch script then stops with `PATCH FAIL`.

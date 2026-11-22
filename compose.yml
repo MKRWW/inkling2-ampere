@@ -3,6 +3,7 @@
 # Defaults: FP8 KV cache (software E4M3), 1 sequence, 128 batched tokens.
 #   original checkpoint:  INK_CTX=180224
 #   all-NVFP4 copy:       INK_CTX=262144
+# Speculative decoding (DSpark): append the two commented lines at the end of `command`.
 services:
   vllm:
     image: inkling-2-mini:ampere
@@ -44,6 +45,8 @@ services:
       - --enable-auto-tool-choice
       - --tool-call-parser
       - inkling
+      # - --speculative-config
+      # - '{"method":"dspark"}'
     deploy:
       resources:
         reservations:
